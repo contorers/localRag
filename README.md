@@ -59,6 +59,3 @@ Project-One-LocalRAG 是一款专注于个人隐私与极致性能的本地大�
 
 4. 安全协议
 端侧处理：参考了分布式架构中的安全设计，在本地实现数据封装，防止敏感信息泄露。
-
-tauri exe可执行文件地址：project-one-localRag\src-tauri\target\release app.exe
-Electron exe可执行文件地址：project-one-localRag\release\win-unpacked LocalRAG-Chat.exe
