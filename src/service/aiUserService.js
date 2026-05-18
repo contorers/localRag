@@ -1,7 +1,6 @@
 // src/service/aiUserService.js
-import { chatDB } from "../Indexdb/db/chatDB.js";
-// 在原有的 import 下面加上这行
-import { systemSetDB } from "../Indexdb/db/systemSetDB.js";
+import { chatDB } from "../composables/IndexDB/db-js/chatDB.js";
+import { systemSetDB } from "../composables/IndexDB/db-js/systemSetDB.js";
 import {
   buildGlobalSearchIndex,
   loadChatHistoryIntoSearch,
@@ -9,12 +8,12 @@ import {
   runBackgroundMemoryHistory,
   getRelevantContextHybrid,
   buildShortTermContext,
-} from "../embedding/searchContext.js";
+} from "../composables/AI-Chat/searchContext.js";
 import { chatUserAIApi } from "../api/ai.js";
 import {
   shouldTriggerRAG,
   sanitizePrivacyInfo,
-} from "../embedding/routerRules.js";
+} from "../composables/AI-Chat/routerRules.js";
 
 let currentModelId = null;
 const compressingChats = new Set();
@@ -54,7 +53,7 @@ export const AIUserService = {
   async sendAIMessage({
     systemRole = "system",
     text: rawText,
-    files = [], // 🌟 新增：接收从前端传来的 file 数组
+    files = [], // 接收从前端传来的 file 数组
     chatId,
     model, // 包含高级参数、baseUrl, path, modelType 等 
     signal,
@@ -70,7 +69,8 @@ export const AIUserService = {
     let fullContent = "";
     let fullReasoning = "";
     let inputTokens = 0;
-    let outputTokens = 0; 
+    let outputTokens = 0;
+
     let apiMessages = [];
    // ==========================================
     // 🌟 阶段 0：处理附件 (图片转 Base64，文档提纯文本)
@@ -86,8 +86,6 @@ export const AIUserService = {
           visionImages.push(b64);
         } else {
           // 2. 如果是文档：提取文本并追加到 prompt
-          // 注意：此处仅支持前端能直接 readAsText 的纯文本/CSV/MD 文件。
-          // 如果是 PDF/Word，你需要在这里调用你的 RAG/PDF.js 解析逻辑
           try {
             const fileContent = await readTextFile(file);
             finalRawText += `\n\n--- 附件 [${file.name}] 内容 ---\n${fileContent}\n--- 附件结束 ---`;
@@ -106,7 +104,8 @@ export const AIUserService = {
     const isNewChat = !chatId;
 
     const estimateTokens = (textStr) =>
-      textStr ? Math.ceil(textStr.length * 1) : 0; 
+      textStr ? Math.ceil(textStr.length * 1) : 0;
+    
     try {
       // ==========================================
       // 🌟 1. 获取全局系统配置 (提供基础兜底)
@@ -122,11 +121,11 @@ export const AIUserService = {
       }; 
       // 🌟 3. 核心判断使用合并后的配置
       const isStream =
-        mergedModelConfig.modelType === "text" || !mergedModelConfig.modelType; 
+        mergedModelConfig.modelType === "text" || !mergedModelConfig.modelType;
+
       // --- 阶段 1：初始化会话 ---
       if (!currentChatId) {
         const titleLen = mergedModelConfig?.chatTitleMaxLength || 15;
-        // 🌟 给纯图片输入一个默认标题
         const safeTitle = text.trim() ? text.slice(0, titleLen) : "[多模态图片对话]";
 
         currentChatId = isTemporary
@@ -136,15 +135,16 @@ export const AIUserService = {
               modelId: mergedModelConfig.modelId,
             });
         if (onChatCreated) onChatCreated(currentChatId);
-      } 
+      }
+
       // ==========================================
-      // 🌟 修复：构造要存入数据库的附件数组 (使用 Base64)
+      // 🌟 构造要存入数据库的附件数组 (使用 Base64)
       // ==========================================
       const dbAttachments = visionImages.map((b64, index) => ({
         isImage: true,
         url: b64, // 存入 Base64 字符串，永久有效
         file: { name: `image_${index}.png` } // 兜底属性，防止前端模板报错
-      })); 
+      }));
 
       if (!isTemporary) {
         userMsgId = await chatDB.addChatMessages({
@@ -152,7 +152,7 @@ export const AIUserService = {
           role: "user",
           content: text || "[发送了图片]", 
           timestamp: Date.now(),
-          attachments: dbAttachments // 🌟 核心修复：把附件存进本地数据库！
+          attachments: dbAttachments // 把附件存进本地数据库
         });
       }
 
@@ -163,9 +163,10 @@ export const AIUserService = {
         userMsgId,
         isTemporary,
         tempMessages,
-        modelConfig: mergedModelConfig, // 👈 必须把融合后的超级配置传下去！
+        modelConfig: mergedModelConfig, // 必须把融合后的超级配置传下去！
       });
       console.log(apiMessages);
+
       if (visionImages.length > 0) {
         // 找到倒数第一条 role 为 user 的消息
         let lastUserMsgIndex = -1;
@@ -180,12 +181,10 @@ export const AIUserService = {
           const originalText = apiMessages[lastUserMsgIndex].content;
           const multiModalContent = [];
           
-          // 推入文字部分
           if (originalText) {
             multiModalContent.push({ type: "text", text: originalText });
           }
           
-          // 推入所有图片 Base64
           visionImages.forEach(b64Data => {
             multiModalContent.push({ 
               type: "image_url", 
@@ -193,13 +192,11 @@ export const AIUserService = {
             });
           });
 
-          // 将原本字符串的 content 替换为 OpenAI 标准的数组对象
           apiMessages[lastUserMsgIndex].content = multiModalContent;
         }
       }
 
       if (onContextAssembled && isStream) {
-        // 如果是多模态数组，这里强转字符串打印或回调可能会显示 [object Object]，忽略即可
         onContextAssembled(typeof apiMessages[apiMessages.length - 1].content === 'string' 
           ? apiMessages.map((m) => m.content).join("\n") 
           : "[多模态内容]");
@@ -227,6 +224,9 @@ export const AIUserService = {
         }
       } else if (mergedModelConfig.modelType === "image") {
         payload.prompt = text;
+
+        // 🌟 修复 1：强制要求 API 直接返回 Base64 数据，防范 URL 过期
+        payload.response_format = "b64_json"; 
 
         if (
           mergedModelConfig.customParams &&
@@ -256,6 +256,7 @@ export const AIUserService = {
           errorJson?.error?.message || `API 错误 (${response.status})`
         );
       }
+      
       // --- 阶段 5：解析响应 (分流处理) ---
       if (isStream) {
         // 文本流式处理
@@ -273,22 +274,26 @@ export const AIUserService = {
           streamResult.outputTokens ||
           estimateTokens(fullContent + fullReasoning);
       } else if (model.modelType === "image") {
-        // 🌟 图像非流式处理：直接解析 JSON
+        // 🌟 修复 2：优先读取 Base64，兜底才读取 URL
         const jsonResult = await response.json();
+        const dataObj = jsonResult.data?.[0];
+        if (!dataObj) throw new Error("API 未返回有效的图片内容");
 
-        // 适配标准 OpenAI 格式，提取 url 或 base64
-        const imageUrl =
-          jsonResult.data?.[0]?.url || jsonResult.data?.[0]?.b64_json;
-        if (!imageUrl) throw new Error("API 未返回有效的图片内容");
+        let finalImageStr = "";
+        
+        if (dataObj.b64_json) {
+          finalImageStr = `data:image/png;base64,${dataObj.b64_json}`;
+        } else if (dataObj.url) {
+          finalImageStr = dataObj.url;
+        } else {
+          throw new Error("API 未返回图片的 URL 或 Base64");
+        }
 
-        // 转换为 Markdown 格式，这样你的聊天框直接就能渲染出图片，不需要改 UI 组件
-        fullContent = `![Generated Image](${imageUrl})`;
-
-        // 主动触发一次 onStreamContent，把完整图片交出去
+        fullContent = `![Generated Image](${finalImageStr})`;
         if (onStreamContent) onStreamContent(fullContent);
 
         inputTokens = estimateTokens(text);
-        outputTokens = 1; // 图像的 Token 计算通常很特殊，这里记为 1
+        outputTokens = 1; 
       }
 
       const finalTokenStr = `[ 输入: ${inputTokens} | 输出: ${outputTokens} | 总计: ${
@@ -297,10 +302,41 @@ export const AIUserService = {
 
       // --- 阶段 6：收尾与后台压缩 ---
       if (!isTemporary) {
+        let finalSavedContent = fullContent.trim();
+
+        // 🌟 修复 3：正则匹配文本流模型吐出的临时图片链接，自动下载转 Base64 永久保存
+        // 匹配格式: ![任意文字](http://或https://...)
+        const mdImageRegex = /!\[.*?\]\((https?:\/\/[^\s)]+)\)/g;
+        const matches = [...finalSavedContent.matchAll(mdImageRegex)];
+        
+        for (const match of matches) {
+          const originalUrl = match[1];
+          // 如果已经是 base64，直接跳过 (比如阶段5生成的)
+          if (originalUrl.startsWith("data:image")) continue; 
+
+          try {
+            const imgResponse = await fetch(originalUrl);
+            if (imgResponse.ok) {
+              const imgBlob = await imgResponse.blob();
+              const base64Data = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(imgBlob);
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = (error) => reject(error);
+              });
+              // 替换成永久有效的 Base64 文本
+              finalSavedContent = finalSavedContent.replace(originalUrl, base64Data);
+            }
+          } catch (downloadErr) {
+            console.warn("AI生成的临时图片下载转储失败(跨域或已失效):", originalUrl, downloadErr);
+          }
+        }
+
+        // 存入替换好安全图片链接的最终内容
         await chatDB.addChatMessages({
           chatId: currentChatId,
           role: "assistant",
-          content: fullContent.trim(),
+          content: finalSavedContent, 
           reasoning: fullReasoning,
           token: finalTokenStr,
           timestamp: Date.now(),
@@ -353,7 +389,7 @@ export const AIUserService = {
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          isProperlyFinished = true; // 正常读取结束（应对部分不发 [DONE] 的厂商）
+          isProperlyFinished = true; // 正常读取结束
           break;
         }
 
@@ -406,9 +442,8 @@ export const AIUserService = {
       }
       return { inputTokens, outputTokens, fullContent, fullReasoning };
     } catch (error) {
-      throw error; // 向上抛出让 _handleError 捕获
+      throw error; 
     } finally {
-      // 核心修改：确保底层流物理中断，避免幽灵流量
       reader.cancel().catch(() => {});
       reader.releaseLock();
     }
@@ -422,8 +457,6 @@ export const AIUserService = {
       error.message.includes("Unexpected");
 
     if (isAbort) {
-      // 核心修改：中断时不要删除 userMsgId，保留用户的提问！
-      // 如果已经有部分回答，将其作为完整的消息保存下来
       if (!ctx.isTemporary && (ctx.fullContent || ctx.fullReasoning)) {
         const partialTokenStr = `[ 中断 | 输入: ${ctx.inputTokens} | 输出: ${ctx.outputTokens} ]`;
         await chatDB.addChatMessages({
@@ -439,11 +472,9 @@ export const AIUserService = {
           outputTokens: ctx.outputTokens,
         });
       } else {
-        // 如果一点内容都没生成就被中断，仅触发完成回调，UI 层处理 loading 状态
         ctx.onStreamFinish?.("[ 已取消 ]", { inputTokens: 0, outputTokens: 0 });
       }
     } else {
-      // 真实报错逻辑保持不变
       const finalTokenStr = `[ 出错: ${error.message} ]`;
       ctx.onStreamFinish?.(finalTokenStr, {
         inputTokens: ctx.inputTokens,
@@ -462,51 +493,37 @@ export const AIUserService = {
     try {
       compressingChats.add(currentChatId);
 
-      // 错峰延迟，防止抢占首屏渲染性能
       const delayMs = modelConfig?.backgroundTaskDelay || 2000;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
 
       const currentChatInfo = await chatDB.queryChatListById(currentChatId);
       if (!currentChatInfo) return;
 
-      // 🌟 轨道一永远执行：向量提纯游标 (RAG)
       const vectorizedCount = currentChatInfo.vectorizedCount || 0; 
       
       const tasks = [];
 
-      // 任务 1：向量记忆提纯存库 (无视模式，永远在后台默默构建向量库)
       tasks.push(
         runBackgroundMemoryCompress(currentChatId, vectorizedCount, modelConfig)
       );
 
-      // 🌟 任务 2：文本摘要降维 (根据双擎模式分流)
       if (modelConfig?.enablePrefixCaching) {
-        // ==========================================
-        // 引擎 B：全量缓存模式 -> 触发【低频大纪元压缩】
-        // ==========================================
         const epochStartIndex = currentChatInfo.epochStartIndex || 0;
         const totalCount = await chatDB.countMessagesByChatId(currentChatId);
         
-        // 计算当前“游离”在摘要外的新消息数量 (-1 是排除当前正在生成的这条)
         const uncompressedCount = Math.max(0, totalCount - 1 - epochStartIndex);
-        const cacheLimit = modelConfig.cacheMessageLimit || 50; // 读取我们刚加的新字段
+        const cacheLimit = modelConfig.cacheMessageLimit || 50; 
 
         console.log(`[Compression] 缓存模式检查: 已堆叠 ${uncompressedCount} 轮 / 阈值 ${cacheLimit} 轮`);
 
-        // 只有当积累的消息超过了设定的最大缓存轮数时，才触发大压缩
         if (uncompressedCount >= cacheLimit) {
           console.log("🔥 [Compression] 达到缓存上限，触发纪元大压缩！");
           
-          // ⚠️ 这里需要你在 searchContext.js 中新增一个专门处理大摘要的方法
-          // 并在完成后将数据库的 epochStartIndex 更新为最新的 totalCount
           tasks.push(
             runEpochMemoryCompression(currentChatId, epochStartIndex, modelConfig)
           );
         }
       } else {
-        // ==========================================
-        // 引擎 A：滑动节约模式 -> 触发【高频小步长压缩】
-        // ==========================================
         const summarizedCount = currentChatInfo.summarizedCount || 0;
         
         console.log(`[Compression] 节约模式触发: 摘要游标[${summarizedCount}]`);
@@ -515,7 +532,6 @@ export const AIUserService = {
         );
       }
 
-      // 并发执行所分配的任务，互不干扰
       const results = await Promise.allSettled(tasks);
 
       results.forEach((res, index) => {
@@ -527,18 +543,16 @@ export const AIUserService = {
     } catch (err) {
       console.error("[Compression] 后台调度器整体异常:", err);
     } finally {
-      compressingChats.delete(currentChatId); // 释放锁
+      compressingChats.delete(currentChatId); 
     }
   },
-   /**
+    /**
    * 辅助方法：组装上下文大礼包
    */
   // ============================================================================
   // 👇 核心上下文路由分发器 (双擎架构)
   // ============================================================================
   async _assembleContext(params) {
-    // 假设你在 modelConfig 里配置了一个字段标识该模型是否支持前缀缓存
-    // 例如：enablePrefixCaching: true
     if (params.modelConfig?.enablePrefixCaching) {
       console.log("🚀 [Context] 启用【全量缓存模式】(Cache Optimized)");
       return await this._assembleContextCacheOptimized(params);
@@ -547,7 +561,6 @@ export const AIUserService = {
       return await this._assembleContextTokenSaver(params);
     }
   },
-
   // ============================================================================
   // 👇 引擎 A：原版滑动窗口模式 (适用于本地模型 / 昂贵且无缓存的 API)
   // ============================================================================
@@ -667,14 +680,11 @@ export const AIUserService = {
         "You are a professional assistant. Answer directly and factually. Match the user language.",
     };
 
-    // 🌟 核心修复：计算 pivot，剔除前端刚塞入的最后一条 User 消息和正在生成的 AI 消息
-    // 因为这最后一条消息，我们在方法最末尾会经过多模态组装后手动 push 进去
     const pivot = Math.max(0, tempMessages.length - 2);
 
     if (isTemporary) {
-      // 临时会话不读数据库摘要，直接全量追加即可
       const rawTempHistory = tempMessages
-        .slice(0, pivot) // 🌟 修复点：只截取到 pivot
+        .slice(0, pivot) 
         .filter((m) => m.content && !m.isGenerating)
         .map((m) => ({ role: m.role, content: m.content }));
       return [
@@ -687,22 +697,19 @@ export const AIUserService = {
     let backgroundContext = [];
     const currentChatInfo = await chatDB.queryChatListById(currentChatId);
 
-    // 1. 静态纪元大摘要 
     if (currentChatInfo?.epochSummary) {
       backgroundContext.push(
         `[Previous Core Context]\n${currentChatInfo.epochSummary}`
       );
     }
 
-    // 2. 追加模式获取近期历史 
     const startIndex = currentChatInfo?.epochStartIndex || 0;
     
     let chatMessages = tempMessages
-      .slice(startIndex, pivot) // 🌟 修复点：限制结束位置为 pivot，完美过滤掉本次新发的信息
+      .slice(startIndex, pivot) 
       .filter((m) => !m.isGenerating && m.content)
       .map((m) => ({ role: m.role, content: m.content }));
 
-    // 3. 极度动态的 RAG 插入
     if (shouldTriggerRAG(text)) {
       try {
         const excludeMsgIds = tempMessages.slice(-20).map((m) => m.id);
@@ -723,7 +730,6 @@ export const AIUserService = {
       }
     }
 
-    // 4. 拼装 payload：顺序严格遵循 [静态 -> 动态]
     const finalPayload = [baseSystemPrompt];
 
     if (backgroundContext.length > 0) {
@@ -733,10 +739,7 @@ export const AIUserService = {
       });
     }
 
-    // 第二层：原汁原味的追加历史记录
     finalPayload.push(...chatMessages);
-
-    // 第三层：最新的提问 (在阶段 2.5 会被替换为图片数组)
     finalPayload.push({ role: "user", content: text });
 
     return finalPayload;
